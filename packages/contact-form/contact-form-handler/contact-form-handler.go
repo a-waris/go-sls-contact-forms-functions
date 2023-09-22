@@ -4,26 +4,16 @@ import (
 	"embed"
 	"fmt"
 	_ "github.com/go-sql-driver/mysql"
+	"net/smtp"
+	"sync"
 )
-
-/* TODO: To handle multiple form types
-var formTypes = map[string]FormType{
-	"tagged": {
-		DBTable:      "tagged_offer_contact_forms",
-		TeamTemplate: "tagged_offer_contact_form.html",
-		UserTemplate: "offer_contact_form_sender_reply.html",
-		TeamSubject:  "{{.Tag}} | Offer Contact Form | Resourceinn | Ad",
-		UserSubject:  "Resourceinn (HRM) | Thank You!",
-	},
-	// Add other form types here as needed
-}
-*/
 
 //go:embed templates/*
 var templatesFS embed.FS
 
-func Main(args map[string]interface{}) map[string]interface{} {
+var smtpClient *smtp.Client
 
+func Main(args map[string]interface{}) map[string]interface{} {
 	response := make(map[string]interface{})
 
 	form, err := extractFormFromArgs(args)
@@ -37,12 +27,29 @@ func Main(args map[string]interface{}) map[string]interface{} {
 		return response
 	}
 
-	if err := sendTeamEmail(form); err != nil {
+	var wg sync.WaitGroup
+	var teamEmailErr, userEmailErr error
+
+	wg.Add(2) // We're going to run two goroutines
+
+	go func() {
+		defer wg.Done()
+		teamEmailErr = sendTeamEmail(form)
+	}()
+
+	go func() {
+		defer wg.Done()
+		userEmailErr = sendUserEmail(form)
+	}()
+
+	wg.Wait() // Wait for both goroutines to finish
+
+	if teamEmailErr != nil {
 		response["error"] = "Failed to send email to the team"
 		return response
 	}
 
-	if err := sendUserEmail(form); err != nil {
+	if userEmailErr != nil {
 		response["error"] = "Failed to send reply email to the user"
 		return response
 	}

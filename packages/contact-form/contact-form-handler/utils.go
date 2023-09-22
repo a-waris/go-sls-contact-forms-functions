@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"crypto/tls"
 	"database/sql"
 	"errors"
 	"fmt"
@@ -93,6 +94,34 @@ func insertFormIntoDB(form TaggedOfferContactForm) error {
 	return err
 }
 
+func getSMTPClient() (*smtp.Client, error) {
+	if smtpClient != nil {
+		return smtpClient, nil
+	}
+
+	fromAddress := os.Getenv("MAIL_FROM_ADDRESS")
+	password := os.Getenv("MAIL_PASSWORD")
+	smtpHost := os.Getenv("MAIL_HOST")
+	smtpPort := os.Getenv("MAIL_PORT")
+
+	conn, err := smtp.Dial(smtpHost + ":" + smtpPort)
+	if err != nil {
+		return nil, err
+	}
+
+	auth := smtp.PlainAuth("", fromAddress, password, smtpHost)
+	if err = conn.StartTLS(&tls.Config{ServerName: smtpHost}); err != nil {
+		return nil, err
+	}
+
+	if err = conn.Auth(auth); err != nil {
+		return nil, err
+	}
+
+	smtpClient = conn
+	return smtpClient, nil
+}
+
 func sendEmail(templatePath, subject, to string, cc []string, form TaggedOfferContactForm) error {
 	// Read the template directly from the embedded filesystem
 	templateContent, err := templatesFS.ReadFile(templatePath)
@@ -103,13 +132,10 @@ func sendEmail(templatePath, subject, to string, cc []string, form TaggedOfferCo
 
 	//fmt.Println(string(templateContent))
 
-	fromAddress := os.Getenv("MAIL_FROM_ADDRESS")
-	fromName := os.Getenv("MAIL_FROM_NAME")
-	password := os.Getenv("MAIL_PASSWORD")
-	smtpHost := os.Getenv("MAIL_HOST")
-	smtpPort := os.Getenv("MAIL_PORT")
-
-	auth := smtp.PlainAuth("", fromAddress, password, smtpHost)
+	client, err := getSMTPClient()
+	if err != nil {
+		return err
+	}
 
 	// Parse and execute the HTML template
 	tmpl, err := template.New("emailTemplate").Parse(string(templateContent))
@@ -129,6 +155,9 @@ func sendEmail(templatePath, subject, to string, cc []string, form TaggedOfferCo
 		ccHeader = "Cc: " + strings.Join(cc, ", ") + "\n"
 	}
 
+	fromAddress := os.Getenv("MAIL_FROM_ADDRESS")
+	fromName := os.Getenv("MAIL_FROM_NAME")
+
 	from := fmt.Sprintf("%s <%s>", fromName, fromAddress)
 
 	msg := "From: " + from + "\n" +
@@ -139,10 +168,28 @@ func sendEmail(templatePath, subject, to string, cc []string, form TaggedOfferCo
 		emailBody
 
 	recipients := append([]string{to}, cc...)
-	err = smtp.SendMail(smtpHost+":"+smtpPort, auth, fromAddress, recipients, []byte(msg))
+	for _, recipient := range recipients {
+		if err := client.Mail(fromAddress); err != nil {
+			return err
+		}
+		if err := client.Rcpt(recipient); err != nil {
+			return err
+		}
+	}
+
+	wc, err := client.Data()
+	if err != nil {
+		return err
+	}
+	_, err = wc.Write([]byte(msg))
+	if err != nil {
+		return err
+	}
+	err = wc.Close()
 	if err != nil {
 		return err
 	}
 
 	return nil
+
 }
